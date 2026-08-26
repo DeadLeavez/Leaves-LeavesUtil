@@ -1,0 +1,72 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Version>1.4.0</Version>
+    <!-- LeavesUtils ships as its own standalone mod now, so other mods can depend on ONE shared
+         install instead of each carrying a private copy that can drift out of sync. -->
+    <OutputPath>..\dist\SPT\user\mods\$(MSBuildProjectName)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- No local package copies needed: everything this mod uses at runtime (including
+         SemanticVersioning, which ModMetadata's types come from) is already loaded by the SPT
+         host process itself - the same reason every other mod in this workspace ships without
+         carrying those DLLs. -->
+    <PackageReference Include="SPTarkov.Common" Version="4.0.13" />
+    <PackageReference Include="SPTarkov.DI" Version="4.0.13" />
+    <PackageReference Include="SPTarkov.Server.Core" Version="4.0.13" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- WebUiHost is an IHttpListener, whose Handle(...) signature uses ASP.NET Core's HttpContext /
+         StatusCodes. Those types live in the ASP.NET Core *shared framework*, which the plain
+         Microsoft.NET.Sdk does NOT reference by default (the Web SDK the old standalone WebUI mod used
+         did). This one line pulls that framework in for compile, without turning this into a full web
+         project. It resolves against the SPT host's already-loaded ASP.NET runtime - nothing extra ships. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="config\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- The web UI's client-side files (rail.js served from rail.txt, the item browser page, the shared
+         base.css) - folded in from the former standalone Leaves-WebUI mod. Served verbatim at runtime. -->
+    <None Include="assets\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+
+  <Target Name="CopyToSecondaryLocation" AfterTargets="Build">
+    <ItemGroup>
+      <OutputFiles Include="$(OutputPath)**\*.*" />
+    </ItemGroup>
+
+    <!-- 1. Purge the ENTIRE previous _dist (old-version zips included) so a version bump doesn't
+         leave stale zips behind and removed/renamed files don't stick round -->
+    <RemoveDir Directories="$(MSBuildProjectDirectory)\_dist"
+      Condition="Exists('$(MSBuildProjectDirectory)\_dist')" />
+
+    <!-- 2. Copy fresh build output into the mod folder structure -->
+    <Copy SourceFiles="@(OutputFiles)"
+      DestinationFolder="$(MSBuildProjectDirectory)\_dist\SPT\user\mods\$(MSBuildProjectName)\%(RecursiveDir)"
+      SkipUnchangedFiles="true" />
+
+    <!-- 3. Zip the CONTENTS of _dist -->
+    <ZipDirectory SourceDirectory="$(MSBuildProjectDirectory)\_dist"
+      DestinationFile="$(MSBuildProjectDirectory)\$(MSBuildProjectName)_$(Version).zip"
+      Overwrite="true" />
+
+    <!-- 4. Purge the loose folder, leaving only the zip -->
+    <RemoveDir Directories="$(MSBuildProjectDirectory)\_dist\SPT" />
+
+    <!-- 5. Move the finished zip into _dist -->
+    <Move SourceFiles="$(MSBuildProjectDirectory)\$(MSBuildProjectName)_$(Version).zip"
+      DestinationFiles="$(MSBuildProjectDirectory)\_dist\$(MSBuildProjectName)_$(Version).zip" />
+  </Target>
+</Project>

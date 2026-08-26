@@ -1,0 +1,8 @@
+{
+	"dataDump": false, //Dumps the full item tree and quest list to debug/ on startup, annotated with item/quest names. Slow (walks every item in the game) - leave off unless you actually need it.
+
+	// Suite-wide web UI profile filter. Applies to every Leaves mod's web UI profile picker (this mod's
+	// /webui/db/profiles feed and Questrandomizer's dropdowns).
+	"WebUI_FilterProfiles": true, //Hide utility/alt profiles (headless clients, dev accounts) from the web UI profile dropdowns.
+	"WebUI_HiddenProfilePrefixes": [ "headless", "zz" ] //When the filter is on, profiles whose nickname STARTS WITH any of these (case-insensitive) are hidden. e.g. "headless_1234", "zzLeavesDev".
+}
