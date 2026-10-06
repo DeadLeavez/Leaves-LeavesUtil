@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
+using SPTarkov.Server.Core.Utils;
 
 namespace Leaves;
 
@@ -16,8 +17,8 @@ public static class HttpUtils
         return context.Request.Path.Value?.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) == true;
     }
 
-    // A GET whose path equals `path`, ignoring case and an optional trailing slash. Lets a route match
-    // both "/foo/ui" and "/foo/ui/" without spelling out both.
+    // A GET whose path equals `path`, ignoring case and an optional trailing slash.
+    // Lets a route match both "/foo/ui" and "/foo/ui/" without spelling out both.
     public static bool IsGet(HttpContext context, string path)
     {
         if (context.Request.Method != "GET")
@@ -38,10 +39,20 @@ public static class HttpUtils
         return (context.Request.Path.Value ?? "").EndsWith(suffix, StringComparison.OrdinalIgnoreCase);
     }
 
-    // Reads a request body as text, transparently zlib-decompressing it. SPT's client RequestHandler
-    // compresses POST bodies (zlib, 0x78 header), and an IHttpListener receives them raw - so a plain
-    // read yields garbage ('x' = 0x78, the zlib magic byte). Falls back to treating the bytes as UTF-8
-    // when they aren't zlib (e.g. a hand-made curl call), so both work.
+    // A POST whose path equals `path`, ignoring case and an optional trailing slash.
+    public static bool IsPost(HttpContext context, string path)
+    {
+        if (context.Request.Method != "POST")
+        {
+            return false;
+        }
+        string actual = (context.Request.Path.Value ?? "").TrimEnd('/');
+        return string.Equals(actual, path.TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+    }
+
+    // Reads a request body as text, transparently zlib-decompressing it.
+    // SPT's client RequestHandler compresses POST bodies (zlib, 0x78 header), and an IHttpListener receives them raw - so a plain read yields garbage ('x' = 0x78, the zlib magic byte).
+    // Falls back to treating the bytes as UTF-8 when they aren't zlib (e.g. a hand-made curl call), so both work.
     public static async Task<string> ReadBody(HttpContext context)
     {
         using var buffer = new MemoryStream();
@@ -120,6 +131,46 @@ public static class HttpUtils
         context.Response.StatusCode = statusCode;
         context.Response.ContentType = "application/json; charset=utf-8";
         await context.Response.WriteAsync(json);
+    }
+
+    // ============================================================
+    // Web config editor - the two halves of a mod's Kind="config" route pair.
+    // GET  /{mod}/config  -> WriteConfigView<TConfig>
+    // POST /{mod}/config  -> read body, call the mod, WriteConfigApply(result)
+    // ============================================================
+
+    // The GET payload: the form schema (from TConfig's attributes) plus the live values.
+    public sealed record ConfigView(object Schema, object Current);
+
+    // The POST result. Messages carries validation errors when Ok is false, or notes
+    // ("restart for the trader-list change") when it is true.
+    public sealed record ConfigApplyResult(bool Ok, IReadOnlyList<string> Messages)
+    {
+        public static ConfigApplyResult Success(params string[] notes)
+        {
+            return new ConfigApplyResult(true, notes);
+        }
+
+        public static ConfigApplyResult Failure(params string[] errors)
+        {
+            return new ConfigApplyResult(false, errors);
+        }
+    }
+
+    // Serialized with SPT's options so MongoId and friends round-trip. currentConfig is the live
+    // config object; TConfig only drives the schema.
+    public static async Task WriteConfigView<TConfig>(HttpContext context, object currentConfig)
+    {
+        ConfigView view = new(Utils.Instance.describeConfig<TConfig>(), currentConfig);
+        await WriteJson(context, StatusCodes.Status200OK, view, JsonUtil.JsonSerializerOptionsNoIndent);
+    }
+
+    // The config-apply response: 200 when Ok, 422 otherwise. The one place that mapping lives, so
+    // every mod's POST /{mod}/config answers the same way.
+    public static async Task WriteConfigApply(HttpContext context, ConfigApplyResult result)
+    {
+        int status = result.Ok ? StatusCodes.Status200OK : StatusCodes.Status422UnprocessableEntity;
+        await WriteJson(context, status, result);
     }
 
     // Path-traversal guard: resolves relative under root, returns false if the result escapes (e.g. a ../ in the query); full is set but unusable when false.

@@ -2,24 +2,21 @@ using System.Text.Json.Serialization;
 
 namespace Leaves
 {
-    // The suite-wide HTTP-route directory. Every Leaves mod hands its public routes to the shared Utils
-    // singleton during its own OnLoad; the Dev page in the web UI (served at /webui/dev) reads them all back
-    // through WebUiHost's /webui/dev/routes endpoint. Because a mod only registers when it's actually loaded,
-    // the list is self-correcting: an uninstalled mod simply never shows up.
+    // The suite-wide HTTP-route directory.
+    // Every Leaves mod hands its public routes to the shared Utils singleton during its own OnLoad; the Dev page in the web UI (served at /webui/dev) reads them all back through WebUiHost's /webui/dev/routes endpoint.
+    // Because a mod only registers when it's actually loaded, the list is self-correcting: an uninstalled mod simply never shows up.
     //
-    // The list is hand-authored per mod (there's no reflection over each listener's path matching), so it can
-    // drift if a route is added without updating the registration - keep the descriptions one line and update
-    // them alongside the route.
+    // The list is hand-authored per mod (there's no reflection over each listener's path matching), so it can drift if a route is added without updating the registration - keep the descriptions one line and update them alongside the route.
     public partial class Utils
     {
-        // Registration happens on the load thread(s); reads happen at runtime from the web UI. All access is
-        // locked so a mid-load query can't see a torn list.
+        // Registration happens on the load thread(s); reads happen at runtime from the web UI.
+        // All access is locked so a mid-load query can't see a torn list.
         private readonly object routeRegistryLock = new();
         private readonly List<RouteInfo> registeredRoutes = new();
 
-        // Called by each mod (usually from OnLoad) with the routes it serves. modName is stamped onto every
-        // entry here so callers don't repeat it. Idempotent: any earlier entries for the same mod are dropped
-        // first, so a second call (or a re-registration) replaces rather than duplicates.
+        // Called by each mod (usually from OnLoad) with the routes it serves.
+        // modName is stamped onto every entry here so callers don't repeat it.
+        // Idempotent: any earlier entries for the same mod are dropped first, so a second call (or a re-registration) replaces rather than duplicates.
         public void RegisterRoutes(string modName, IEnumerable<RouteInfo> routes)
         {
             lock (routeRegistryLock)
@@ -33,8 +30,8 @@ namespace Leaves
             }
         }
 
-        // A snapshot copy of everything registered so far, for the Dev page to serialize. A copy so the caller
-        // can't hold the lock while serializing (and can't mutate our backing list).
+        // A snapshot copy of everything registered so far, for the Dev page to serialize.
+        // A copy so the caller can't hold the lock while serializing (and can't mutate our backing list).
         public List<RouteInfo> GetRegisteredRoutes()
         {
             lock (routeRegistryLock)
@@ -45,10 +42,9 @@ namespace Leaves
     }
 
     // One public HTTP route a mod exposes, as shown on the Dev page. Mod is filled in by RegisterRoutes.
-    // Kind groups routes for the reader: "ui" = an HTML page, "api" = a data endpoint meant to be called by
-    // hand or by a page, "internal" = a route the client talks to but you'd rarely poke directly.
-    // Danger marks a route that can permanently alter data when called - the Dev page flags those with a
-    // warning symbol so nobody fires one off casually.
+    // Kind groups routes for the reader: "ui" = an HTML page, "api" = a data endpoint meant to be called by hand or by a page, "internal" = a route the client talks to but you'd rarely poke directly.
+    // "config" is special: register a GET with this Kind and the web config editor picks the mod up automatically (view-only); add a POST with the same Kind and the same path and it becomes editable. The GET returns { Schema, Current } (see HttpUtils.WriteConfigView); the POST takes the edited config and returns a ConfigApplyResult (see HttpUtils.ReadConfigApply).
+    // Danger marks a route that can permanently alter data when called - the Dev page flags those with a warning symbol so nobody fires one off casually.
     public class RouteInfo
     {
         [JsonPropertyName("mod")] public string Mod { get; set; } = "";

@@ -34,15 +34,15 @@
     <None Include="config\**">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <!-- The web UI's client-side files (rail.js served from rail.txt, the item browser page, the shared
-         base.css) - folded in from the former standalone Leaves-WebUI mod. Served verbatim at runtime. -->
-    <None Include="assets\**">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
+    <!-- The web UI's static files (rail.txt, base.css, the item-browser / config-editor / dev /
+         load-order pages) moved to the Leaves-WebUI mod - this mod no longer ships an assets/ folder.
+         WebUiHost keeps only the compute endpoints (/webui/db/*, /webui/dev/*Json, /webui/config, ...). -->
   </ItemGroup>
 
 
-  <Target Name="CopyToSecondaryLocation" AfterTargets="Build">
+  <!-- SkipModPackaging=true (passed by tools/ConfigSync) skips the _dist zip dance for a
+       build that only needs the compiled assembly. A normal build still packages. -->
+  <Target Name="CopyToSecondaryLocation" AfterTargets="Build" Condition="'$(SkipModPackaging)' != 'true'">
     <ItemGroup>
       <OutputFiles Include="$(OutputPath)**\*.*" />
     </ItemGroup>

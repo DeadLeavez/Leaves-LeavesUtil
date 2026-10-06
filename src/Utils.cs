@@ -118,6 +118,14 @@ namespace Leaves
             return jsonUtil.Deserialize<T>(fileUtil.ReadFile(file))!;
         }
 
+        // Parses a JSON string through SPT's JsonUtil (MongoId-aware). Returns default for empty
+        // input; throws on malformed JSON, same as jsonUtil.Deserialize.
+        // Pairs with the web config editor: the POST body is a string, not a file.
+        public T? stringToJson<T>(string json)
+        {
+            return jsonUtil.Deserialize<T>(json);
+        }
+
         // MongoId-safe save via SPT's JsonUtil. modPath is explicit because this class is shared, so there's no "current mod folder" to assume.
         public void saveJsonFile<T>(
             T data,
@@ -227,6 +235,115 @@ namespace Leaves
             return item.Properties!.Grids!.ElementAt(gridIndex).Properties!.Filters!.First().Filter!;
         }
 
+        // depth 0 = walk to the root; depth N = at most N hops (1 = immediate _parent only).
+        public bool hasParent(MongoId tpl, MongoId parentNode, int depth = 0)
+        {
+            Dictionary<MongoId, TemplateItem> itemDB = databaseService.GetItems();
+            if (!itemDB.TryGetValue(tpl, out TemplateItem? item))
+            {
+                return false;
+            }
+
+            MongoId current = item.Parent;
+            int hops = 0;
+            while (true)
+            {
+                if (current == parentNode)
+                {
+                    return true;
+                }
+                hops++;
+                if (depth > 0 && hops >= depth)
+                {
+                    return false;
+                }
+                if (hops > 64)
+                {
+                    // cycle guard
+                    return false;
+                }
+                if (!itemDB.TryGetValue(current, out TemplateItem? node))
+                {
+                    // root has no DB entry for its _parent - end of the chain
+                    return false;
+                }
+                current = node.Parent;
+            }
+        }
+
+        // Adds `tpl` to the ExcludedFilter of every grid of every item under `familyNode`.
+        // Call from a late IOnLoad (PostSptModLoader + high) or content-mod items are missed.
+        // Returns the count of templates touched.
+        public int addToGridBlacklist(MongoId tpl, MongoId familyNode, int depth = 0)
+        {
+            Dictionary<MongoId, TemplateItem> itemDB = databaseService.GetItems();
+            MongoId itemRoot = new("54009119af1c881c07000029");
+            int touched = 0;
+
+            foreach (KeyValuePair<MongoId, TemplateItem> entry in itemDB)
+            {
+                TemplateItem template = entry.Value;
+                if (template.Properties == null || template.Properties.Grids == null)
+                {
+                    continue;
+                }
+                if (!hasParent(entry.Key, familyNode, depth))
+                {
+                    continue;
+                }
+
+                bool changed = false;
+                foreach (Grid grid in template.Properties.Grids)
+                {
+                    if (grid.Properties == null)
+                    {
+                        continue;
+                    }
+
+                    bool hasFilter = false;
+                    if (grid.Properties.Filters != null)
+                    {
+                        foreach (GridFilter existing in grid.Properties.Filters)
+                        {
+                            hasFilter = true;
+                            break;
+                        }
+                    }
+                    if (!hasFilter)
+                    {
+                        // no filter = accepts everything; synthesise one that still does
+                        grid.Properties.Filters = new List<GridFilter>
+                        {
+                            new GridFilter
+                            {
+                                Filter = new HashSet<MongoId> { itemRoot },
+                                ExcludedFilter = new HashSet<MongoId>(),
+                            },
+                        };
+                    }
+
+                    foreach (GridFilter filter in grid.Properties.Filters!)
+                    {
+                        if (filter.ExcludedFilter == null)
+                        {
+                            filter.ExcludedFilter = new HashSet<MongoId>();
+                        }
+                        if (filter.ExcludedFilter.Add(tpl))
+                        {
+                            changed = true;
+                        }
+                    }
+                }
+
+                if (changed)
+                {
+                    touched++;
+                }
+            }
+
+            return touched;
+        }
+
         // Is this trade a straight cash sale rather than a barter?
         // Guarded because other trader mods ship trades with a missing/empty barter scheme; we log and treat those as non-money rather than crash.
         public bool isMoneyTrade(TraderAssort assort, Item trade)
@@ -248,11 +365,11 @@ namespace Leaves
             return Money.GetMoneyTpls().Contains(scheme[0][0].Template);
         }
 
-        // Adds a purchasable trade to a trader: the stock item, its cost, and its loyalty gate. `cost` is a
-        // list of required items (all needed together - an AND barter); a single money/currency entry makes
-        // it a plain cash sale. Returns the new assort item id (distinct from the tpl - one tpl can be sold
-        // multiple times). Mirrors the vanilla assort shape (Items + BarterScheme + LoyalLevelItems) so it
-        // behaves like any normal trader offer. `default` (empty id) is returned if the trader doesn't exist.
+        // Adds a purchasable trade to a trader: the stock item, its cost, and its loyalty gate.
+        // `cost` is a list of required items (all needed together - an AND barter); a single money/currency entry makes it a plain cash sale.
+        // Returns the new assort item id (distinct from the tpl - one tpl can be sold multiple times).
+        // Mirrors the vanilla assort shape (Items + BarterScheme + LoyalLevelItems) so it behaves like any normal trader offer.
+        // `default` (empty id) is returned if the trader doesn't exist.
         public MongoId addTrade(MongoId traderId, MongoId itemTpl, List<TradeEntry> cost, int loyaltyLevel, int stackCount = 999999, bool unlimited = true)
         {
             var traders = databaseService.GetTraders();
@@ -298,8 +415,8 @@ namespace Leaves
             return itemId;
         }
 
-        // Convenience overloads for the common single-currency cash sale. `price` is in units of `currency`
-        // (Money.ROUBLES, USD/EUR, a GP-coin tpl, …).
+        // Convenience overloads for the common single-currency cash sale.
+        // `price` is in units of `currency` (Money.ROUBLES, USD/EUR, a GP-coin tpl, …).
         public MongoId addTrade(MongoId traderId, MongoId itemTpl, MongoId currency, double price, int loyaltyLevel, int stackCount = 999999, bool unlimited = true)
         {
             return addTrade(traderId, itemTpl, new List<TradeEntry> { new TradeEntry(currency, price) }, loyaltyLevel, stackCount, unlimited);
@@ -406,7 +523,7 @@ namespace Leaves
             {
                 return false;
             }
-            
+
             return StartedQuestStatuses.Contains(status.Value);
         }
 

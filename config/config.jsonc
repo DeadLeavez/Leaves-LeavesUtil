@@ -4,5 +4,10 @@
 	// Suite-wide web UI profile filter. Applies to every Leaves mod's web UI profile picker (this mod's
 	// /webui/db/profiles feed and Questrandomizer's dropdowns).
 	"WebUI_FilterProfiles": true, //Hide utility/alt profiles (headless clients, dev accounts) from the web UI profile dropdowns.
-	"WebUI_HiddenProfilePrefixes": [ "headless", "zz" ] //When the filter is on, profiles whose nickname STARTS WITH any of these (case-insensitive) are hidden. e.g. "headless_1234", "zzLeavesDev".
+	"WebUI_HiddenProfilePrefixes": [ "headless", "zz" ], //When the filter is on, profiles whose nickname STARTS WITH any of these (case-insensitive) are hidden. e.g. "headless_1234", "zzLeavesDev".
+
+	// Web UI "accident lock". Non-empty string = the rail greys out protected entries (the Config Editor and the Dev Utils
+	// pages) and makes them unclickable until you click their padlock and enter this password. Remembered only for the current
+	// browser tab (session storage). NOT security: anyone with the direct URL can still open the page. Empty = nothing locked.
+	"WebUI_LockPassword": "FiskPassword"
 }

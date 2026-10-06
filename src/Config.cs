@@ -15,4 +15,8 @@ public record LeavesUtilsConfig
 
     [JsonPropertyName("WebUI_HiddenProfilePrefixes")]
     public List<string> WebUiHiddenProfilePrefixes { get; set; } = new() { "headless", "zz" };
+
+    // Non-empty = the web UI rail greys out "protected" entries (the Config Editor and the Dev Utils pages) until the user clicks the padlock and enters this. Held in the browser tab's session storage only; not real security (the direct URL still works).
+    [JsonPropertyName("WebUI_LockPassword")]
+    public string WebUiLockPassword { get; set; } = "";
 }

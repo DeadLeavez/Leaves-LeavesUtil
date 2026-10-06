@@ -38,8 +38,7 @@ public partial class WebUiHost
     }
 
     // One row of /webui/dev/loadorderJson: an IOnLoad component and the priority that decides when it runs.
-    // index is the position in the sorted run order (1-based); priority is the raw Injectable TypePriority;
-    // stage names the OnLoadOrder band it falls in; assembly is the DLL (a mod name, or SPTarkov.Server.Core).
+    // index is the position in the sorted run order (1-based); priority is the raw Injectable TypePriority; stage names the OnLoadOrder band it falls in; assembly is the DLL (a mod name, or SPTarkov.Server.Core).
     private class LoadOrderEntry
     {
         [JsonPropertyName("index")] public int Index { get; set; }
@@ -49,6 +48,13 @@ public partial class WebUiHost
         [JsonPropertyName("class")] public string Class { get; set; } = "";
         [JsonPropertyName("assembly")] public string Assembly { get; set; } = "";
         [JsonPropertyName("injection")] public string Injection { get; set; } = "";
+    }
+
+    // One row of /webui/db/traders: a trader the config-editor picker can offer for an [AllowedIds(Trader)] field.
+    private class TraderEntry
+    {
+        [JsonPropertyName("id")] public string Id { get; set; } = "";
+        [JsonPropertyName("nickname")] public string Nickname { get; set; } = "";
     }
 
     // One row of /webui/db/profiles: a stored profile the page can pick from.
@@ -95,6 +101,14 @@ public partial class WebUiHost
         }
     }
 
+    // GET /webui/lock: whether the rail should lock protected entries, and the SHA-256 (hex) of the
+    // configured password for the client to check against. hash is null when enabled is false.
+    private class LockInfo
+    {
+        [JsonPropertyName("enabled")] public bool Enabled { get; set; }
+        [JsonPropertyName("hash")] public string? Hash { get; set; }
+    }
+
     // One row of /webui/rail/neighbors: an installed neighbor mod for the rail to render.
     private class NeighborEntry
     {
@@ -102,5 +116,14 @@ public partial class WebUiHost
         [JsonPropertyName("icon")] public string Icon { get; set; } = "";
         [JsonPropertyName("url")] public string Url { get; set; } = "";
         [JsonPropertyName("external")] public bool External { get; set; }
+    }
+
+    // One row of /webui/config: a mod that registered a Kind="config" GET (get), and its POST
+    // (save) if it registered one too. save == null means view-only.
+    private class ConfigModEntry
+    {
+        [JsonPropertyName("mod")] public string Mod { get; set; } = "";
+        [JsonPropertyName("get")] public string? Get { get; set; }
+        [JsonPropertyName("save")] public string? Save { get; set; }
     }
 }

@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 using SPTarkov.DI.Annotations;
@@ -29,19 +30,28 @@ public partial class WebUiHost(
     {
         var routes = new List<RouteInfo>
         {
-            new RouteInfo("GET", "/webui/rail.js", "Suite-wide nav-rail client script (served from rail.txt).", "internal"),
-            new RouteInfo("GET", "/webui/base.css", "Suite-wide shared stylesheet linked by every mod page.", "internal"),
-            new RouteInfo("GET", "/webui/db", "Item Browser page.", "ui"),
-            new RouteInfo("GET", "/webui/dev/routes", "Dev page: this route directory.", "ui"),
+            // The static page/asset files below (rail.js, base.css, the item-browser / dev / load-order
+            // / config-editor pages) are now served by the Leaves-WebUI mod, which registers them under
+            // "Web UI (static files)". Left here commented so the move is visible.
+            //   new RouteInfo("GET", "/webui/rail.js", "Suite-wide nav-rail client script (served from rail.txt).", "internal"),
+            //   new RouteInfo("GET", "/webui/base.css", "Suite-wide shared stylesheet linked by every mod page.", "internal"),
+            //   new RouteInfo("GET", "/webui/db", "Item Browser page.", "ui"),
+            //   new RouteInfo("GET", "/webui/dev/routes", "Dev page: this route directory.", "ui"),
+            //   new RouteInfo("GET", "/webui/dev/loadorder", "Dev page: IOnLoad run order across all mods + core.", "ui"),
+            //   new RouteInfo("GET", "/webui/config/ui", "Universal config editor page (?mod=<registered mod name>).", "ui"),
             new RouteInfo("GET", "/webui/dev/routesJson", "Every route each installed mod registered, as JSON.", "api"),
-            new RouteInfo("GET", "/webui/dev/loadorder", "Dev page: IOnLoad run order across all mods + core.", "ui"),
             new RouteInfo("GET", "/webui/dev/loadorderJson", "Every IOnLoad component and its Injectable priority, in run order, as JSON.", "api"),
             new RouteInfo("GET", "/webui/rail/neighbors", "Installed non-Leaves mod UIs for the rail to link out to.", "api"),
+            new RouteInfo("GET", "/webui/lock", "Web UI accident-lock state: { enabled, hash } (SHA-256 of the configured password) for the rail's padlock.", "api"),
+            new RouteInfo("GET", "/webui/config", "Config editor feed: mods that registered a Kind=\"config\" GET (+ optional POST).", "api"),
             new RouteInfo("GET", "/webui/db/index", "Full item search index (one compact row per item).", "api"),
             new RouteInfo("GET", "/webui/db/query?parent=&name=&desc=&type=&limit=", "Item query; name/desc are case-insensitive regex, all filters AND.", "api"),
+            new RouteInfo("GET", "/webui/db/nodes", "Category (Node) tree only, nested from the root; no leaf items.", "api"),
+            new RouteInfo("GET", "/webui/db/traders", "Trader picker feed [{ id, nickname }] for [AllowedIds(Trader)] fields.", "api"),
             new RouteInfo("GET", "/webui/db/profiles", "Profile-picker feed [{ id, nickname, level }].", "api"),
             new RouteInfo("GET", "/webui/db/stash?profileId=", "A profile's stash contents summed by template id.", "api"),
             new RouteInfo("GET", "/webui/db/item/{id}", "Full detail blob for one item (template + locale + handbook).", "api"),
+            new RouteInfo("GET", "/webui/db/localeNames", "Flat { id: displayName } of every \" Name\" locale key plus trader nicknames; the live (modded) name table for offline id-label lookups.", "api"),
         };
         Utils.Instance.RegisterRoutes("LeavesUtil (Web UI)", routes);
         return Task.CompletedTask;
@@ -51,10 +61,16 @@ public partial class WebUiHost(
     private const string DbPagePath = "/webui/db";
     private const string DbIndexPath = "/webui/db/index";
     private const string DbQueryPath = "/webui/db/query";
+    private const string DbNodesPath = "/webui/db/nodes";
+    private const string DbTradersPath = "/webui/db/traders";
     private const string DbItemPrefix = "/webui/db/item/";
     private const string DbProfilesPath = "/webui/db/profiles";
     private const string DbStashPath = "/webui/db/stash";
+    private const string DbLocaleNamesPath = "/webui/db/localeNames";
     private const string RailNeighborsPath = "/webui/rail/neighbors";
+    private const string LockPath = "/webui/lock";
+    private const string ConfigListPath = "/webui/config";
+    private const string ConfigUiPath = "/webui/config/ui";
     private const string DevPagePath = "/webui/dev/routes";
     private const string DevRoutesJsonPath = "/webui/dev/routesJson";
     private const string LoadOrderPagePath = "/webui/dev/loadorder";
@@ -68,10 +84,12 @@ public partial class WebUiHost(
         new NeighborDef("RaidReview", "Raid Review", "🎬", "/", true, 7829),
     };
 
-    // UI assets under assets/ui/, read fresh per request (rare) so tweaks to a deployed file show without a rebuild.
-    private readonly string uiDir = System.IO.Path.Combine(
-        modHelper.GetAbsolutePathToModFolder(System.Reflection.Assembly.GetExecutingAssembly()),
-        "assets", "ui");
+    // The static UI files this host used to serve (rail.txt, base.css, itembrowser.html,
+    // config-editor.html, dev.html, loadorder.html) moved to the Leaves-WebUI mod - so there is no
+    // assets/ui/ folder here any more. The compute endpoints below build their responses in code.
+    //   private readonly string uiDir = System.IO.Path.Combine(
+    //       modHelper.GetAbsolutePathToModFolder(System.Reflection.Assembly.GetExecutingAssembly()),
+    //       "assets", "ui");
 
     // Built once on first request; the database is static after load. Locked because SPT dispatches requests concurrently.
     private readonly object cacheLock = new();
@@ -79,10 +97,32 @@ public partial class WebUiHost(
     private Dictionary<string, string>? cachedLocale;
     private HashSet<string>? cachedVanillaIds;
     private string? cachedLoadOrderJson;
+    private string? cachedNodeTreeJson;
+    private string? cachedLocaleNamesJson;
+    private string? cachedTradersJson;
+
+    // Static page/asset paths now served by the Leaves-WebUI mod. Excluded here so exactly one listener
+    // claims each (dispatch order between listeners is not guaranteed). Everything else under /webui/ -
+    // the /webui/db/* data feeds, /webui/dev/*Json, /webui/config, /webui/rail/neighbors, /webui/lock -
+    // is still ours. See WEBUI_EXTRACTION_PLAN.md.
+    private static readonly HashSet<string> MovedToWebUiMod = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "/webui/rail.js",
+        "/webui/base.css",
+        "/webui/db",
+        "/webui/config/ui",
+        "/webui/dev/routes",
+        "/webui/dev/loadorder",
+    };
 
     public bool CanHandle(MongoId sessionId, HttpContext context)
     {
-        return HttpUtils.HasPrefix(context, Prefix);
+        if (!HttpUtils.HasPrefix(context, Prefix))
+        {
+            return false;
+        }
+        string path = (context.Request.Path.Value ?? "").TrimEnd('/');
+        return !MovedToWebUiMod.Contains(path);
     }
 
     public async Task Handle(MongoId sessionId, HttpContext context)
@@ -90,43 +130,36 @@ public partial class WebUiHost(
         string path = context.Request.Path.Value ?? "";
         string method = context.Request.Method;
 
-        if (method == "GET" && path.EndsWith("/rail.js", StringComparison.OrdinalIgnoreCase))
-        {
-            // Stored on disk as rail.txt, not rail.js: SPT's ModValidator rejects any mod folder containing a .js/.ts file as a legacy mod. The browser only cares about the Content-Type.
-            await HttpUtils.ServeFile(context, System.IO.Path.Combine(uiDir, "rail.txt"), "application/javascript; charset=utf-8");
-        }
-        else if (method == "GET" && path.EndsWith("/base.css", StringComparison.OrdinalIgnoreCase))
-        {
-            // The suite-wide shared stylesheet, linked by every mod page.
-            await HttpUtils.ServeFile(context, System.IO.Path.Combine(uiDir, "base.css"), "text/css; charset=utf-8");
-        }
-        else if (method == "GET" && (
-            path.Equals(DbPagePath, StringComparison.OrdinalIgnoreCase) ||
-            path.Equals(DbPagePath + "/", StringComparison.OrdinalIgnoreCase)))
-        {
-            await HttpUtils.ServeFile(context, System.IO.Path.Combine(uiDir, "itembrowser.html"), "text/html; charset=utf-8");
-        }
-        else if (method == "GET" && path.Equals(RailNeighborsPath, StringComparison.OrdinalIgnoreCase))
+        // --- Static file serves moved to the Leaves-WebUI mod (see WEBUI_EXTRACTION_PLAN.md). Kept
+        //     commented rather than deleted; CanHandle already routes these paths elsewhere. ---
+        //   if (method == "GET" && path.EndsWith("/rail.js", ...))                 -> shared/rail.txt
+        //   else if (method == "GET" && path.EndsWith("/base.css", ...))           -> shared/base.css
+        //   else if (method == "GET" && path.Equals(DbPagePath, ...))              -> shared/itembrowser.html
+        //   else if (method == "GET" && path.Equals(ConfigUiPath, ...))            -> shared/config-editor.html
+        //   else if (method == "GET" && path.Equals(DevPagePath, ...))             -> shared/dev.html
+        //   else if (method == "GET" && path.Equals(LoadOrderPagePath, ...))       -> shared/loadorder.html
+        if (method == "GET" && path.Equals(RailNeighborsPath, StringComparison.OrdinalIgnoreCase))
         {
             await ServeNeighbors(context);
         }
-        else if (method == "GET" && (
-            path.Equals(DevPagePath, StringComparison.OrdinalIgnoreCase) ||
-            path.Equals(DevPagePath + "/", StringComparison.OrdinalIgnoreCase)))
+        else if (method == "GET" && path.Equals(LockPath, StringComparison.OrdinalIgnoreCase))
         {
-            await HttpUtils.ServeFile(context, System.IO.Path.Combine(uiDir, "dev.html"), "text/html; charset=utf-8");
+            await ServeLock(context);
         }
+        else if (method == "GET" && path.Equals(ConfigListPath, StringComparison.OrdinalIgnoreCase))
+        {
+            await ServeConfigList(context);
+        }
+        // config-editor.html / dev.html static serves moved to the Leaves-WebUI mod.
+        //   else if (method == "GET" && path.Equals(ConfigUiPath, ...)) -> shared/config-editor.html
+        //   else if (method == "GET" && path.Equals(DevPagePath, ...))  -> shared/dev.html
         else if (method == "GET" && path.Equals(DevRoutesJsonPath, StringComparison.OrdinalIgnoreCase))
         {
             // The suite-wide route directory: every route each installed mod registered into the shared Utils singleton.
             await HttpUtils.WriteJsonRaw(context, StatusCodes.Status200OK, jsonUtil.Serialize(Utils.Instance.GetRegisteredRoutes(), false) ?? "[]");
         }
-        else if (method == "GET" && (
-            path.Equals(LoadOrderPagePath, StringComparison.OrdinalIgnoreCase) ||
-            path.Equals(LoadOrderPagePath + "/", StringComparison.OrdinalIgnoreCase)))
-        {
-            await HttpUtils.ServeFile(context, System.IO.Path.Combine(uiDir, "loadorder.html"), "text/html; charset=utf-8");
-        }
+        // loadorder.html static serve moved to the Leaves-WebUI mod.
+        //   else if (method == "GET" && path.Equals(LoadOrderPagePath, ...)) -> shared/loadorder.html
         else if (method == "GET" && path.Equals(LoadOrderJsonPath, StringComparison.OrdinalIgnoreCase))
         {
             // Every IOnLoad component the server will run at boot, in the order it runs them.
@@ -140,9 +173,21 @@ public partial class WebUiHost(
         {
             await ServeQuery(context);
         }
+        else if (method == "GET" && path.Equals(DbNodesPath, StringComparison.OrdinalIgnoreCase))
+        {
+            await HttpUtils.WriteJsonRaw(context, StatusCodes.Status200OK, GetNodeTreeJson());
+        }
+        else if (method == "GET" && path.Equals(DbTradersPath, StringComparison.OrdinalIgnoreCase))
+        {
+            await HttpUtils.WriteJsonRaw(context, StatusCodes.Status200OK, GetTradersJson());
+        }
         else if (method == "GET" && path.Equals(DbProfilesPath, StringComparison.OrdinalIgnoreCase))
         {
             await ServeProfiles(context);
+        }
+        else if (method == "GET" && path.Equals(DbLocaleNamesPath, StringComparison.OrdinalIgnoreCase))
+        {
+            await HttpUtils.WriteJsonRaw(context, StatusCodes.Status200OK, GetLocaleNamesJson());
         }
         else if (method == "GET" && path.Equals(DbStashPath, StringComparison.OrdinalIgnoreCase))
         {
@@ -170,6 +215,64 @@ public partial class WebUiHost(
         {
             cachedLocale ??= localeService.GetLocaleDb("en");
             return cachedLocale;
+        }
+    }
+
+    // GET /webui/db/localeNames -> a flat { "<id>": "<displayName>" } of every locale "<id> Name"
+    // key (suffix stripped) plus every trader's nickname. This is the live, post-mod name table -
+    // WTT items, cloned meds, modded traders all included - so an offline tool (ConfigSync) can
+    // resolve the same id labels CommentedJson's defaultIdLabel would, without a running server.
+    // Locale wins over a trader nickname on the rare id that has both, matching defaultIdLabel.
+    // Built once and cached; the database is static after load.
+    private string GetLocaleNamesJson()
+    {
+        lock (cacheLock)
+        {
+            if (cachedLocaleNamesJson != null)
+            {
+                return cachedLocaleNamesJson;
+            }
+
+            const string suffix = " Name";
+            var names = new Dictionary<string, string>();
+
+            foreach (var pair in GetLocale())
+            {
+                if (!pair.Key.EndsWith(suffix, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                if (string.IsNullOrEmpty(pair.Value))
+                {
+                    continue;
+                }
+                string id = pair.Key.Substring(0, pair.Key.Length - suffix.Length);
+                if (id.Length == 0)
+                {
+                    continue;
+                }
+                names[id] = pair.Value;
+            }
+
+            foreach (var pair in databaseService.GetTraders())
+            {
+                string id = pair.Key.ToString();
+                // Prefer the locale "<id> Nickname" (the shown name: "Ref", "Lightkeeper", "BTR
+                // Driver") over Base.Nickname, which carries the wrong internal value for several
+                // traders ("Arena", "caretaker", Cyrillic "БТР").
+                string nickname = TraderDisplayName(id, pair.Value.Base?.Nickname, GetLocale());
+                if (string.IsNullOrEmpty(nickname))
+                {
+                    continue;
+                }
+                if (!names.ContainsKey(id))
+                {
+                    names[id] = nickname;
+                }
+            }
+
+            cachedLocaleNamesJson = jsonUtil.Serialize(names, false) ?? "{}";
+            return cachedLocaleNamesJson;
         }
     }
 
@@ -201,20 +304,15 @@ public partial class WebUiHost(
         }
     }
 
-    // Every IOnLoad component the server runs at boot, in run order, as JSON. Built once (the set of loaded
-    // types is fixed after startup) and cached.
+    // Every IOnLoad component the server runs at boot, in run order, as JSON.
+    // Built once (the set of loaded types is fixed after startup) and cached.
     //
-    // We discover them by REFLECTION rather than by injecting IEnumerable<IOnLoad>: this class is itself an
-    // IOnLoad, so taking that collection in our constructor would be a circular dependency (resolving us needs
-    // us). Reflection also constructs nothing, so a component's constructor can't run a second time at request
-    // time. The DI container decides run order purely by Injectable.TypePriority ascending
-    // (DependencyInjectionHandler sorts by it), so replicating that sort reproduces the real order. Ties (two
-    // components at the same priority) have no guaranteed order at runtime either - they simply sort adjacent
-    // here, which is exactly the ambiguity worth seeing.
+    // We discover them by REFLECTION rather than by injecting IEnumerable<IOnLoad>: this class is itself an IOnLoad, so taking that collection in our constructor would be a circular dependency (resolving us needs us).
+    // Reflection also constructs nothing, so a component's constructor can't run a second time at request time.
+    // The DI container decides run order purely by Injectable.TypePriority ascending (DependencyInjectionHandler sorts by it), so replicating that sort reproduces the real order.
+    // Ties (two components at the same priority) have no guaranteed order at runtime either - they simply sort adjacent here, which is exactly the ambiguity worth seeing.
     //
-    // Caveat: this lists every DI-registered IOnLoad type present; it can't see a type dropped by another
-    // mod's [Injectable(TypeOverride=...)], and it reflects IOnLoad ORDER, which equals a mod's real effect
-    // order only when that mod does its work inside OnLoad (code run outside the IOnLoad pass is invisible).
+    // Caveat: this lists every DI-registered IOnLoad type present; it can't see a type dropped by another mod's [Injectable(TypeOverride=...)], and it reflects IOnLoad ORDER, which equals a mod's real effect order only when that mod does its work inside OnLoad (code run outside the IOnLoad pass is invisible).
     private string GetLoadOrderJson()
     {
         lock (cacheLock)
@@ -284,8 +382,7 @@ public partial class WebUiHost(
         }
     }
 
-    // Sort by run order: ascending TypePriority (what the DI container uses), then class name so the display is
-    // stable within a shared priority.
+    // Sort by run order: ascending TypePriority (what the DI container uses), then class name so the display is stable within a shared priority.
     private static int CompareLoadOrder(LoadOrderEntry a, LoadOrderEntry b)
     {
         if (a.Priority != b.Priority)
@@ -541,6 +638,189 @@ public partial class WebUiHost(
         await HttpUtils.WriteJsonRaw(context, StatusCodes.Status200OK, jsonUtil.Serialize(results, false) ?? "[]");
     }
 
+    // One node of /webui/db/nodes: a category in the item tree (Type == "Node"), never a real item.
+    // directItems = real items whose parent is exactly this node; totalItems = real items anywhere in this subtree.
+    private class NodeTreeEntry
+    {
+        [JsonPropertyName("id")] public string Id { get; set; } = "";
+        [JsonPropertyName("name")] public string Name { get; set; } = "";
+        [JsonPropertyName("short")] public string Short { get; set; } = "";
+        [JsonPropertyName("parent")] public string Parent { get; set; } = "";
+        [JsonPropertyName("depth")] public int Depth { get; set; }
+        [JsonPropertyName("directItems")] public int DirectItems { get; set; }
+        [JsonPropertyName("totalItems")] public int TotalItems { get; set; }
+        [JsonPropertyName("children")] public List<NodeTreeEntry> Children { get; set; } = new();
+    }
+
+    // GET /webui/db/nodes -> the category skeleton only: every Type == "Node" template, nested from the single root ("Item"). No leaf items.
+    // Built once and cached; the item DB is static after load.
+    private string GetNodeTreeJson()
+    {
+        lock (cacheLock)
+        {
+            if (cachedNodeTreeJson != null)
+            {
+                return cachedNodeTreeJson;
+            }
+
+            var locale = GetLocale();
+            var itemDb = databaseService.GetItems();
+
+            var nodesById = new Dictionary<string, NodeTreeEntry>();
+            var directItemCount = new Dictionary<string, int>();
+
+            foreach (var pair in itemDb)
+            {
+                var template = pair.Value;
+                string id = pair.Key.ToString();
+                string parent = template.Parent.ToString();
+
+                if ((template.Type ?? "") == "Node")
+                {
+                    string name;
+                    if (locale.TryGetValue(id + " Name", out var localeName) && localeName.Length > 0)
+                    {
+                        name = localeName;
+                    }
+                    else
+                    {
+                        name = template.Name ?? id;
+                    }
+                    locale.TryGetValue(id + " ShortName", out var shortValue);
+
+                    nodesById[id] = new NodeTreeEntry
+                    {
+                        Id = id,
+                        Name = name,
+                        Short = shortValue ?? "",
+                        Parent = parent,
+                    };
+                }
+                else if (directItemCount.TryGetValue(parent, out int existing))
+                {
+                    directItemCount[parent] = existing + 1;
+                }
+                else
+                {
+                    directItemCount[parent] = 1;
+                }
+            }
+
+            var childNodeIds = new Dictionary<string, List<string>>();
+            string? rootId = null;
+            foreach (NodeTreeEntry entry in nodesById.Values)
+            {
+                directItemCount.TryGetValue(entry.Id, out int direct);
+                entry.DirectItems = direct;
+
+                if (nodesById.ContainsKey(entry.Parent))
+                {
+                    if (!childNodeIds.TryGetValue(entry.Parent, out var kids))
+                    {
+                        kids = new List<string>();
+                        childNodeIds[entry.Parent] = kids;
+                    }
+                    kids.Add(entry.Id);
+                }
+                else
+                {
+                    // parent isn't itself a node, so this is the tree root
+                    rootId = entry.Id;
+                }
+            }
+
+            NodeTreeEntry? root = null;
+            if (rootId != null)
+            {
+                root = BuildNodeSubtree(rootId, 0, nodesById, childNodeIds);
+            }
+
+            cachedNodeTreeJson = jsonUtil.Serialize(root, true) ?? "{}";
+            return cachedNodeTreeJson;
+        }
+    }
+
+    // Depth-first assembly of one node and everything under it; fills Depth, Children (sorted by name), and TotalItems (own DirectItems plus every descendant's).
+    private static NodeTreeEntry BuildNodeSubtree(
+        string nodeId,
+        int depth,
+        Dictionary<string, NodeTreeEntry> nodesById,
+        Dictionary<string, List<string>> childNodeIds
+    )
+    {
+        NodeTreeEntry node = nodesById[nodeId];
+        node.Depth = depth;
+
+        int total = node.DirectItems;
+        if (childNodeIds.TryGetValue(nodeId, out var kids))
+        {
+            kids.Sort((string a, string b) =>
+            {
+                return string.CompareOrdinal(nodesById[a].Name, nodesById[b].Name);
+            });
+            foreach (string kidId in kids)
+            {
+                NodeTreeEntry child = BuildNodeSubtree(kidId, depth + 1, nodesById, childNodeIds);
+                node.Children.Add(child);
+                total += child.TotalItems;
+            }
+        }
+        node.TotalItems = total;
+        return node;
+    }
+
+    // A trader's shown name: the locale "<id> Nickname" when present and non-empty, else Base.Nickname.
+    // Base.Nickname is an internal value for several traders (Ref = "Arena", Lightkeeper = "caretaker",
+    // BTR = Cyrillic "БТР"); the locale nickname is what the game actually shows. A modded/newer trader
+    // with no locale key (e.g. Storyteller) still resolves via its Base.Nickname.
+    private static string TraderDisplayName(string id, string? baseNickname, Dictionary<string, string> locale)
+    {
+        if (locale.TryGetValue(id + " Nickname", out var localeNick) && !string.IsNullOrEmpty(localeNick))
+        {
+            return localeNick;
+        }
+        return baseNickname ?? "";
+    }
+
+    // GET /webui/db/traders -> [{ id, nickname }], the trader-picker feed for [AllowedIds(Trader)]
+    // fields in the config editor. Every trader with a nickname; sorted by nickname for a stable list.
+    // Built once and cached; the trader table is static after load.
+    private string GetTradersJson()
+    {
+        lock (cacheLock)
+        {
+            if (cachedTradersJson != null)
+            {
+                return cachedTradersJson;
+            }
+
+            var locale = GetLocale();
+            var traders = new List<TraderEntry>();
+            foreach (var pair in databaseService.GetTraders())
+            {
+                string id = pair.Key.ToString();
+                string nickname = TraderDisplayName(id, pair.Value.Base?.Nickname, locale);
+                if (string.IsNullOrEmpty(nickname))
+                {
+                    continue;
+                }
+                traders.Add(new TraderEntry
+                {
+                    Id = id,
+                    Nickname = nickname,
+                });
+            }
+
+            traders.Sort((TraderEntry a, TraderEntry b) =>
+            {
+                return string.CompareOrdinal(a.Nickname, b.Nickname);
+            });
+
+            cachedTradersJson = jsonUtil.Serialize(traders, false) ?? "[]";
+            return cachedTradersJson;
+        }
+    }
+
     // GET /webui/db/profiles -> [{ id, nickname, level }], the profile-picker feed for any web UI page.
     // Skips profiles with no nickname (not yet created) and utility/alt accounts hit by the shared prefix filter.
     private async Task ServeProfiles(HttpContext context)
@@ -562,7 +842,7 @@ public partial class WebUiHost(
             {
                 Id = profileId.ToString(),
                 Nickname = nickname,
-                Level = pmc.Info.Level ?? 0,
+                Level = pmc?.Info?.Level ?? 0,
             });
         }
         await HttpUtils.WriteJsonRaw(context, StatusCodes.Status200OK, jsonUtil.Serialize(profiles, false) ?? "[]");
@@ -598,8 +878,8 @@ public partial class WebUiHost(
             Items = new Dictionary<string, int>(),
         };
 
-        var items = pmc.Inventory?.Items;
-        MongoId? stashId = pmc.Inventory?.Stash;
+        var items = pmc?.Inventory?.Items;
+        MongoId? stashId = pmc?.Inventory?.Stash;
         if (items != null && stashId.HasValue)
         {
             // index children by parent once, then walk breadth-first from the stash root so nested containers are picked up for free
@@ -649,6 +929,48 @@ public partial class WebUiHost(
         await HttpUtils.WriteJsonRaw(context, StatusCodes.Status200OK, jsonUtil.Serialize(response, false) ?? "{}");
     }
 
+    // GET /webui/config -> one row per mod that registered a Kind="config" GET into the shared
+    // route directory, carrying that GET's path and (when present) its Kind="config" POST path.
+    // The rail turns each row into a cog linking to /webui/config/ui?mod=<name>.
+    private async Task ServeConfigList(HttpContext context)
+    {
+        var byMod = new Dictionary<string, ConfigModEntry>();
+        foreach (RouteInfo route in Utils.Instance.GetRegisteredRoutes())
+        {
+            if (route.Kind != "config")
+            {
+                continue;
+            }
+
+            if (!byMod.TryGetValue(route.Mod, out ConfigModEntry? entry))
+            {
+                entry = new ConfigModEntry { Mod = route.Mod };
+                byMod[route.Mod] = entry;
+            }
+
+            if (route.Method == "GET")
+            {
+                entry.Get = route.Path;
+            }
+            else if (route.Method == "POST")
+            {
+                entry.Save = route.Path;
+            }
+        }
+
+        var list = new List<ConfigModEntry>();
+        foreach (ConfigModEntry entry in byMod.Values)
+        {
+            // A POST with no GET isn't a usable surface - nothing to load into the form.
+            if (entry.Get != null)
+            {
+                list.Add(entry);
+            }
+        }
+
+        await HttpUtils.WriteJsonRaw(context, StatusCodes.Status200OK, jsonUtil.Serialize(list, false) ?? "[]");
+    }
+
     // GET /webui/rail/neighbors -> the installed non-Leaves mod UIs, for the rail to link out to.
     // Same-origin mods get a relative url; an external mod (RaidReview) gets an absolute http://host:port/ built from the request host and its port. A mod we can't inspect is just left out.
     private async Task ServeNeighbors(HttpContext context)
@@ -691,6 +1013,30 @@ public partial class WebUiHost(
         }
 
         await HttpUtils.WriteJsonRaw(context, StatusCodes.Status200OK, jsonUtil.Serialize(found, false) ?? "[]");
+    }
+
+    // GET /webui/lock -> LockInfo. The rail's padlock verifies the typed password against this hash entirely client-side.
+    // Read fresh (not cached) so editing WebUI_LockPassword takes effect without a server restart.
+    private async Task ServeLock(HttpContext context)
+    {
+        string modPath = modHelper.GetAbsolutePathToModFolder(System.Reflection.Assembly.GetExecutingAssembly());
+        var config = modHelper.GetJsonDataFromFile<LeavesUtilsConfig>(modPath, "config/config.jsonc");
+        string password = config.WebUiLockPassword ?? "";
+
+        var info = new LockInfo();
+        if (password.Length > 0)
+        {
+            byte[] digest = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(password));
+            var hex = new System.Text.StringBuilder(digest.Length * 2);
+            foreach (byte b in digest)
+            {
+                hex.Append(b.ToString("x2"));
+            }
+            info.Enabled = true;
+            info.Hash = hex.ToString();
+        }
+
+        await HttpUtils.WriteJsonRaw(context, StatusCodes.Status200OK, jsonUtil.Serialize(info, false) ?? "{}");
     }
 
     // Reads RaidReview's live http port from its config/config.json ("web_client_port"), falling back to the default if unreadable.
